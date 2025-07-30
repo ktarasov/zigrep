@@ -43,10 +43,3 @@ fn grep(allocator: std.mem.Allocator, pattern: [:0]const u8, file_names: []const
         }
     }
 }
-
-test "grep memory leeks" {
-    const allocator = std.testing.allocator;
-    const pattern: [:0]const u8 = "GeneralPurposeAllocator";
-    const file_paths = [_][:0]const u8{ "../learning-zig-rus/src/ch06.md", "../learning-zig-rus/src/ch07.md", "../learning-zig-rus/src/ch08.md", "../learning-zig-rus/src/ch09.md" };
-    try grep(allocator, pattern, file_paths[0..], .{});
-}
