@@ -33,9 +33,6 @@ pub fn build(b: *std.Build) void {
         .root_module = exe_mod,
     });
 
-    const zglob_dep = b.dependency("zglob", .{ .target = target, .optimize = optimize });
-    exe.root_module.addImport("zglob", zglob_dep.module("zglob"));
-
     // This declares intent for the executable to be installed into the
     // standard location when the user invokes the "install" step (the default
     // step when running `zig build`).
@@ -67,8 +64,6 @@ pub fn build(b: *std.Build) void {
     const exe_unit_tests = b.addTest(.{
         .root_module = exe_mod,
     });
-
-    exe_unit_tests.root_module.addImport("zglob", zglob_dep.module("zglob"));
 
     const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
 

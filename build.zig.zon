@@ -35,12 +35,7 @@
     // `zig build --fetch` can be used to fetch all dependencies of a package, recursively.
     // Once all dependencies are fetched, `zig build` no longer requires
     // internet connectivity.
-    .dependencies = .{
-        .zglob = .{
-            .url = "git+https://github.com/pierrejoye/zig-glob.git#b4cf33856b77146312cf54343d22b9e7577f6dc6",
-            .hash = "zglob-0.0.0-kkzhZWuOAgCjuH2Vq8oC5Ec-hpNkCOHdsce8ofIW2RNp",
-        },
-    },
+    .dependencies = .{},
     .paths = .{
         "build.zig",
         "build.zig.zon",
