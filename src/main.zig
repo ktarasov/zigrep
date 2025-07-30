@@ -1,5 +1,4 @@
 const std = @import("std");
-const zglob = @import("zglob");
 
 const Options = struct {};
 
@@ -20,16 +19,17 @@ pub fn main() !void {
     try grep(allocator, args[1], args[2..], .{});
 }
 
+/// Функция поиска строки внутри списка файлов
 fn grep(allocator: std.mem.Allocator, pattern: [:0]const u8, file_names: []const [:0]const u8, options: Options) !void {
     _ = options;
 
     const stdout = std.io.getStdOut().writer();
 
     for (file_names) |file_path| {
-        const absolutePath = try std.fs.realpathAlloc(allocator, file_path);
-        defer allocator.free(absolutePath);
+        const absolute_path = try std.fs.realpathAlloc(allocator, file_path);
+        defer allocator.free(absolute_path);
 
-        const file = try std.fs.openFileAbsolute(absolutePath, .{});
+        const file = try std.fs.openFileAbsolute(absolute_path, .{});
         defer file.close();
 
         var buf_reader = std.io.bufferedReader(file.reader());
@@ -38,7 +38,7 @@ fn grep(allocator: std.mem.Allocator, pattern: [:0]const u8, file_names: []const
         var line_buf: [8192]u8 = undefined;
         while (try in_stream.readUntilDelimiterOrEof(&line_buf, '\n')) |line| {
             if (std.mem.indexOf(u8, line, pattern)) |index| {
-                try stdout.print("{s}:{d}: {s}\n", .{ absolutePath, index + 1, line });
+                try stdout.print("{s}:{d}: {s}\n", .{ absolute_path, index + 1, line });
             }
         }
     }
