@@ -1,9 +1,7 @@
 const std = @import("std");
-const builtin = @import("builtin");
 const fs = std.fs;
 const io = std.io;
 const process = std.process;
-const os = std.os;
 const mem = std.mem;
 const posix = std.posix;
 
