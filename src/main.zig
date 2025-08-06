@@ -137,7 +137,7 @@ fn processFile(allocator: mem.Allocator, config: Config) !void {
             .auto => posix.isatty(stdout.handle) or config.force_color,
         };
 
-        var line_buf: [1024]u8 = undefined;
+        var line_buf: [16384]u8 = undefined;
         var line_num: usize = 1;
 
         while (try reader.readUntilDelimiterOrEof(&line_buf, '\n')) |line| {
