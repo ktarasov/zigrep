@@ -1,4 +1,5 @@
 const std = @import("std");
+const testing = std.testing;
 const fs = std.fs;
 const io = std.io;
 const process = std.process;
@@ -234,4 +235,117 @@ fn printHelp(prog_name: []const u8) void {
         \\  --help                Show this help
         \\
     , .{});
+}
+
+test "parseArgs basic test" {
+    const allocator = testing.allocator;
+
+    // Создаем аргументы с нуль-терминатором
+    const args = try allocator.alloc([:0]u8, 3);
+    defer {
+        for (args) |arg| allocator.free(arg);
+        allocator.free(args);
+    }
+
+    args[0] = try allocator.dupeZ(u8, "zigrep");
+    args[1] = try allocator.dupeZ(u8, "pattern");
+    args[2] = try allocator.dupeZ(u8, "file.txt");
+
+    const config = try parseArgs(args);
+
+    // Проверяем значения с использованием try
+    try testing.expect(mem.eql(u8, config.pattern, "pattern"));
+    try testing.expect(config.filename.len == 1);
+    try testing.expect(mem.eql(u8, config.filename[0], "file.txt"));
+}
+
+test "parseArgs color scheme test" {
+    const allocator = testing.allocator;
+
+    const args = try allocator.alloc([:0]u8, 5);
+    defer {
+        for (args) |arg| allocator.free(arg);
+        allocator.free(args);
+    }
+
+    args[0] = try allocator.dupeZ(u8, "zigrep");
+    args[1] = try allocator.dupeZ(u8, "--color-scheme");
+    args[2] = try allocator.dupeZ(u8, "dark");
+    args[3] = try allocator.dupeZ(u8, "pattern");
+    args[4] = try allocator.dupeZ(u8, "file.txt");
+
+    const config = try parseArgs(args);
+    try testing.expect(mem.eql(u8, config.scheme.pattern, "\x1b[38;5;208m")); // Исправлен escape-код
+}
+
+test "parseArgs color mode test" {
+    const allocator = testing.allocator;
+
+    const args = try allocator.alloc([:0]u8, 5);
+    defer {
+        for (args) |arg| allocator.free(arg);
+        allocator.free(args);
+    }
+
+    args[0] = try allocator.dupeZ(u8, "zigrep");
+    args[1] = try allocator.dupeZ(u8, "--color");
+    args[2] = try allocator.dupeZ(u8, "always");
+    args[3] = try allocator.dupeZ(u8, "pattern");
+    args[4] = try allocator.dupeZ(u8, "file.txt");
+
+    const config = try parseArgs(args);
+    try testing.expect(config.color_mode == .always);
+}
+
+test "highlightLine basic test" {
+    const allocator = testing.allocator;
+
+    const line = "Hello world";
+    const pattern = "world";
+    const scheme = ColorScheme{
+        .pattern = "\x1b[31m",
+        .line_num = "\x1b[33m",
+        .reset = "\x1b[0m",
+    };
+
+    var result = try highlightLine(allocator, line, pattern, scheme, true);
+    defer result.deinit();
+
+    const expected = "Hello \x1b[31mworld\x1b[0m";
+    try testing.expect(mem.eql(u8, result.items, expected));
+}
+
+test "highlightLine multiple matches test" {
+    const allocator = testing.allocator;
+
+    const line = "foo bar foo";
+    const pattern = "foo";
+    const scheme = ColorScheme{
+        .pattern = "\x1b[31m",
+        .line_num = "\x1b[33m",
+        .reset = "\x1b[0m",
+    };
+
+    var result = try highlightLine(allocator, line, pattern, scheme, true);
+    defer result.deinit();
+
+    const expected = "\x1b[31mfoo\x1b[0m bar \x1b[31mfoo\x1b[0m";
+    try testing.expect(mem.eql(u8, result.items, expected));
+}
+
+test "highlightLine no match test" {
+    const allocator = testing.allocator;
+
+    const line = "Hello world";
+    const pattern = "nonexistent";
+    const scheme = ColorScheme{
+        .pattern = "\x1b[31m",
+        .line_num = "\x1b[33m",
+        .reset = "\x1b[0m",
+    };
+
+    var result = try highlightLine(allocator, line, pattern, scheme, true);
+    defer result.deinit();
+
+    try testing.expect(mem.eql(u8, result.items, line));
 }
