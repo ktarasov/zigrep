@@ -237,6 +237,8 @@ fn printHelp(prog_name: []const u8) void {
     , .{});
 }
 
+// Test section
+
 test "parseArgs basic test" {
     const allocator = testing.allocator;
 
