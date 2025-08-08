@@ -21,6 +21,23 @@ zig build -Doptimize=ReleaseSafe
 
 Исполняемый модуль утилиты после сборки содержится по пути `./zig-out/bin/zigrep`.
 
+### Примеры использования
+
+Обычный запуск с параметрами
+```bash
+./zig-out/bin/zigrep error /var/log/syslog
+```
+
+Запуск по несколким файлам
+```bash
+./zig-out/bin/zigrep error /var/log/*.log
+```
+
+Запуск с получение данных из linux pipe
+```bash
+cat /var/log/syslog | ./zig-out/bin/zigrep "error"
+```
+
 ## Контакты
 
 С вопросами, просьба обращаться на kvt+gv@peredelka-saitov.ru
