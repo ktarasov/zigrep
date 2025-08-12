@@ -49,6 +49,7 @@ const Config = struct {
     count_lines: bool = false,
     pattern: []const u8,
     filenames: [][]const u8,
+    ignore_case: bool = false,
 
     pub fn deinit(self: *const Config, allocator: Allocator) void {
         allocator.free(self.pattern);
@@ -100,6 +101,7 @@ fn parseArgs(allocator: Allocator, args: [][:0]u8) !Config {
     var show_line_numbers = true;
     var show_filenames = true;
     var count_lines = false;
+    var ignore_case = false;
     var force_color = false;
     var scheme = SCHEMES.get("default").?;
 
@@ -107,22 +109,55 @@ fn parseArgs(allocator: Allocator, args: [][:0]u8) !Config {
     while (i < args.len) {
         const arg = args[i];
 
-        if (mem.startsWith(u8, arg, "--")) {
-            if (mem.eql(u8, arg, "--color")) {
-                i += 1;
-                color_mode = std.meta.stringToEnum(ColorMode, args[i]) orelse return error.InvalidColorMode;
-            } else if (mem.eql(u8, arg, "--color-scheme")) {
-                i += 1;
-                scheme = try parseColorScheme(args[i]);
-            } else if (mem.eql(u8, arg, "--help")) {
-                printHelp(args[0]);
-                process.exit(0);
-            } else if (mem.eql(u8, arg, "--no-line-numbers")) {
-                show_line_numbers = false;
-            } else if (mem.eql(u8, arg, "--no-filenames")) {
-                show_filenames = false;
-            } else if (mem.eql(u8, arg, "--count-lines")) {
-                count_lines = true;
+        if (mem.startsWith(u8, arg, "-")) {
+            if (mem.startsWith(u8, arg, "--")) {
+                if (arg.len > 2) {
+                    // Обработка длинных флаговов
+                    const long_flag = arg[2..];
+                    if (mem.eql(u8, long_flag, "color")) {
+                        i += 1;
+                        color_mode = std.meta.stringToEnum(ColorMode, args[i]) orelse return error.InvalidColorMode;
+                    } else if (mem.eql(u8, long_flag, "color-scheme")) {
+                        i += 1;
+                        scheme = try parseColorScheme(args[i]);
+                    } else if (mem.eql(u8, long_flag, "help")) {
+                        printHelp(args[0]);
+                        process.exit(0);
+                    } else if (mem.eql(u8, long_flag, "no-line-numbers")) {
+                        show_line_numbers = false;
+                    } else if (mem.eql(u8, long_flag, "no-filenames")) {
+                        show_filenames = false;
+                    } else if (mem.eql(u8, long_flag, "count-lines")) {
+                        count_lines = true;
+                    } else if (mem.eql(u8, long_flag, "ignore-case")) {
+                        ignore_case = true;
+                    }
+                } else unreachable;
+            } else {
+                // Обработка коротких флаговов
+                var j: usize = 1;
+                while (j < arg.len) : (j += 1) {
+                    const flag = arg[j];
+                    switch (flag) {
+                        'h' => {
+                            printHelp(args[0]);
+                            process.exit(0);
+                        },
+                        'c' => {
+                            count_lines = true;
+                        },
+                        'l' => {
+                            show_line_numbers = false;
+                        },
+                        'f' => {
+                            show_filenames = false;
+                        },
+                        'i' => {
+                            ignore_case = true;
+                        },
+                        else => continue,
+                    }
+                }
             }
         } else if (pattern == null) {
             pattern = try allocator.dupe(u8, arg);
@@ -148,7 +183,10 @@ fn parseArgs(allocator: Allocator, args: [][:0]u8) !Config {
     }
 
     return Config{
-        .pattern = pattern orelse return error.MissingPattern,
+        .pattern = pattern orelse {
+            printHelp(args[0]);
+            process.exit(0);
+        },
         .filenames = filenames.toOwnedSlice() catch |err| {
             // Явное освобождение при ошибке
             for (filenames.items) |f| allocator.free(f);
@@ -160,6 +198,7 @@ fn parseArgs(allocator: Allocator, args: [][:0]u8) !Config {
         .show_line_numbers = show_line_numbers,
         .show_filenames = show_filenames,
         .count_lines = count_lines,
+        .ignore_case = ignore_case,
     };
 }
 
@@ -182,7 +221,15 @@ fn processStream(
         defer line_buffer.clearRetainingCapacity();
 
         const line = line_buffer.items;
-        if (mem.indexOf(u8, line, config.pattern) != null) {
+
+        var patternIsFound = false;
+        if (config.ignore_case) {
+            patternIsFound = std.ascii.indexOfIgnoreCase(line, config.pattern) != null;
+        } else {
+            patternIsFound = mem.indexOf(u8, line, config.pattern) != null;
+        }
+
+        if (patternIsFound) {
             count += 1;
 
             if (!config.count_lines) {
@@ -195,6 +242,7 @@ fn processStream(
                     config.show_filenames,
                     source_name,
                     line_num,
+                    config.ignore_case,
                 );
                 defer highlighted.deinit();
 
@@ -250,6 +298,7 @@ fn highlightLine(
     show_filenames: bool,
     filename_path: []const u8,
     line_num: u32,
+    ignore_case: bool,
 ) !std.ArrayList(u8) {
     var result = std.ArrayList(u8).init(allocator);
     var last_idx: usize = 0;
@@ -262,14 +311,41 @@ fn highlightLine(
         try result.writer().print("{s}\t", .{filename_path});
     }
 
-    while (mem.indexOf(u8, line[last_idx..], pattern)) |start| {
+    while (true) {
+        const remaining = line[last_idx..];
+        if (remaining.len < pattern.len) break;
+
+        const start_opt = if (ignore_case)
+            std.ascii.indexOfIgnoreCase(remaining, pattern)
+        else
+            std.mem.indexOf(u8, remaining, pattern);
+
+        const start = start_opt orelse break;
         const abs_start = last_idx + start;
+
+        // Критически важная проверка границ
+        if (abs_start + pattern.len > line.len) {
+            try result.appendSlice(remaining);
+            break;
+        }
+
+        // Проверка полного совпадения для ignore_case
+        if (ignore_case) {
+            const candidate = line[abs_start .. abs_start + pattern.len];
+            if (!std.ascii.eqlIgnoreCase(candidate, pattern)) {
+                last_idx += 1;
+                continue;
+            }
+        }
+
         try result.appendSlice(line[last_idx..abs_start]);
         try result.appendSlice(scheme.pattern);
-        try result.appendSlice(pattern);
+        try result.appendSlice(line[abs_start .. abs_start + pattern.len]);
         try result.appendSlice(scheme.reset);
         last_idx = abs_start + pattern.len;
     }
+
+    // Добавляем оставшуюся часть строки
     try result.appendSlice(line[last_idx..]);
     return result;
 }
@@ -278,8 +354,8 @@ fn printHelp(prog_name: []const u8) void {
     std.debug.print(
         \\Usage: {s} [OPTIONS] PATTERN FILE
         \\Options:
-        \\  --color <MODE>        Color mode (always/auto/never)
-        \\  --color-scheme <NAME> Color scheme (available: 
+        \\      --color <MODE>        Color mode (always/auto/never)
+        \\      --color-scheme <NAME> Color scheme (available: 
     , .{prog_name});
 
     for (SCHEMES.keys(), 0..) |kv, i| {
@@ -290,10 +366,11 @@ fn printHelp(prog_name: []const u8) void {
     std.debug.print(")\n", .{});
 
     std.debug.print(
-        \\  --no-line-numbers     Disable line numbers
-        \\  --no-filenames        Disable filenames
-        \\  --count-lines         Show the count lines has been found
-        \\  --help                Show this help
+        \\  -l, --no-line-numbers     Disable line numbers
+        \\  -f, --no-filenames        Disable filenames
+        \\  -i, --ignore-case         Case insensitive search
+        \\  -c, --count-lines         Show the count lines has been found
+        \\  -h, --help                Show this help
         \\
     , .{});
 }
@@ -376,7 +453,7 @@ test "highlightLine basic test" {
         .reset = "\x1b[0m",
     };
 
-    var result = try highlightLine(allocator, line, pattern, scheme, false, false, "(test)", 1);
+    var result = try highlightLine(allocator, line, pattern, scheme, false, false, "(test)", 1, false);
     defer result.deinit();
 
     const expected = "Hello \x1b[31mworld\x1b[0m";
@@ -394,7 +471,7 @@ test "highlightLine multiple matches test" {
         .reset = "\x1b[0m",
     };
 
-    var result = try highlightLine(allocator, line, pattern, scheme, false, false, "(test)", 1);
+    var result = try highlightLine(allocator, line, pattern, scheme, false, false, "(test)", 1, false);
     defer result.deinit();
 
     const expected = "\x1b[31mfoo\x1b[0m bar \x1b[31mfoo\x1b[0m";
@@ -412,7 +489,7 @@ test "highlightLine no match test" {
         .reset = "\x1b[0m",
     };
 
-    var result = try highlightLine(allocator, line, pattern, scheme, false, false, "(test)", 1);
+    var result = try highlightLine(allocator, line, pattern, scheme, false, false, "(test)", 1, false);
     defer result.deinit();
 
     try testing.expect(mem.eql(u8, result.items, line));
@@ -446,4 +523,78 @@ test "process stdin input" {
 
     const expected = "(stdin)\tsecond \x1b[31merror\x1b[0m line\n";
     try testing.expectEqualStrings(expected, output.items);
+}
+
+test "case insensitive search" {
+    const allocator = testing.allocator;
+
+    // Тест 1: Проверка парсинга флага -i
+    {
+        const args = try allocator.alloc([:0]u8, 4);
+        defer {
+            for (args) |arg| allocator.free(arg);
+            allocator.free(args);
+        }
+
+        args[0] = try allocator.dupeZ(u8, "zgrep");
+        args[1] = try allocator.dupeZ(u8, "-i");
+        args[2] = try allocator.dupeZ(u8, "PaTtErN");
+        args[3] = try allocator.dupeZ(u8, "file.txt");
+
+        const config = try parseArgs(allocator, args);
+        defer config.deinit(allocator);
+
+        try testing.expect(config.ignore_case);
+        try testing.expect(mem.eql(u8, config.pattern, "PaTtErN"));
+    }
+
+    // Тест 2: Проверка парсинга флага --ignore-case
+    {
+        const args = try allocator.alloc([:0]u8, 4);
+        defer {
+            for (args) |arg| allocator.free(arg);
+            allocator.free(args);
+        }
+
+        args[0] = try allocator.dupeZ(u8, "zgrep");
+        args[1] = try allocator.dupeZ(u8, "--ignore-case");
+        args[2] = try allocator.dupeZ(u8, "PaTtErN");
+        args[3] = try allocator.dupeZ(u8, "file.txt");
+
+        const config = try parseArgs(allocator, args);
+        defer config.deinit(allocator);
+
+        try testing.expect(config.ignore_case);
+        try testing.expect(mem.eql(u8, config.pattern, "PaTtErN"));
+    }
+
+    // Тест 3: Проверка фактического поиска без учета регистра
+    {
+        const input = "First LINE\nSecond line\nTHIRD Line\n";
+        var fbs = std.io.fixedBufferStream(input);
+
+        const config = Config{
+            .pattern = "line",
+            .filenames = &[_][]const u8{},
+            .scheme = ColorScheme{
+                .pattern = "",
+                .line_num = "",
+                .reset = "",
+            },
+            .color_mode = .never,
+            .show_line_numbers = false,
+            .count_lines = false,
+            .ignore_case = true,
+        };
+
+        var output = std.ArrayList(u8).init(allocator);
+        defer output.deinit();
+
+        const count = try processStream(allocator, fbs.reader(), config, "test.txt", output.writer());
+
+        try testing.expect(count == 3);
+        try testing.expect(mem.eql(u8, output.items, "test.txt\tFirst LINE\n" ++
+            "test.txt\tSecond line\n" ++
+            "test.txt\tTHIRD Line\n"));
+    }
 }
