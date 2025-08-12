@@ -40,5 +40,8 @@ cat /var/log/syslog | ./zig-out/bin/zigrep "error"
 
 ## Контакты
 
-С вопросами, просьба обращаться на kvt+gv@peredelka-saitov.ru
-Константин Тарасов
+[Константин Тарасов](mailto:kvt+gv@peredelka-saitov.ru)
+
+[Чат для разговоров о разработке на Zig](https://t.me/zig_lang_ru)
+
+[Учебник на русском языке](https://zig-lang.ru/)
