@@ -61,11 +61,20 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
 
-    const exe_unit_tests = b.addTest(.{
-        .root_module = exe_mod,
+    const unit_test_mod = b.createModule(.{
+        .root_source_file = b.path("tests/unit_tests.zig"),
+        .target = target,
+        .optimize = optimize,
     });
 
+    const exe_unit_tests = b.addTest(.{
+        .root_module = unit_test_mod,
+    });
+
+    exe_unit_tests.root_module.addImport("zigrep", exe_mod);
+
     const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
+    // run_exe_unit_tests.skip_foreign_checks = true;
 
     // Similar to creating the run step earlier, this exposes a `test` step to
     // the `zig build --help` menu, providing a way for the user to request

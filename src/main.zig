@@ -8,7 +8,7 @@ const posix = std.posix;
 const Allocator = std.mem.Allocator;
 
 // Цветовые схемы с использованием StaticStringMap
-const ColorScheme = struct {
+pub const ColorScheme = struct {
     pattern: []const u8,
     line_num: []const u8,
     reset: []const u8,
@@ -40,7 +40,7 @@ const SCHEMES = std.StaticStringMap(ColorScheme).initComptime(.{
 const ColorMode = enum { auto, always, never };
 
 // Конфигурация приложения
-const Config = struct {
+pub const Config = struct {
     color_mode: ColorMode = .auto,
     scheme: ColorScheme,
     show_line_numbers: bool = true,
@@ -92,7 +92,7 @@ fn parseColorScheme(name: []const u8) !ColorScheme {
     };
 }
 
-fn parseArgs(allocator: Allocator, args: [][:0]u8) !Config {
+pub fn parseArgs(allocator: Allocator, args: [][:0]u8) !Config {
     var filenames = std.ArrayList([]const u8).init(allocator);
     defer filenames.deinit();
 
@@ -202,7 +202,7 @@ fn parseArgs(allocator: Allocator, args: [][:0]u8) !Config {
     };
 }
 
-fn processStream(
+pub fn processStream(
     allocator: Allocator,
     reader: anytype,
     config: Config,
@@ -289,7 +289,7 @@ fn processInput(allocator: Allocator, config: Config, writer: anytype) !u32 {
     return total_count;
 }
 
-fn highlightLine(
+pub fn highlightLine(
     allocator: Allocator,
     line: []const u8,
     pattern: []const u8,
@@ -373,228 +373,4 @@ fn printHelp(prog_name: []const u8) void {
         \\  -h, --help                Show this help
         \\
     , .{});
-}
-
-// Test section
-
-test "parseArgs basic test" {
-    const allocator = testing.allocator;
-
-    // Создаем аргументы с нуль-терминатором
-    const args = try allocator.alloc([:0]u8, 3);
-    defer {
-        for (args) |arg| allocator.free(arg);
-        allocator.free(args);
-    }
-
-    args[0] = try allocator.dupeZ(u8, "zigrep");
-    args[1] = try allocator.dupeZ(u8, "pattern");
-    args[2] = try allocator.dupeZ(u8, "file.txt");
-
-    const config = try parseArgs(allocator, args);
-    defer config.deinit(allocator);
-
-    // Проверяем значения с использованием try
-    try testing.expect(mem.eql(u8, config.pattern, "pattern"));
-    try testing.expect(config.filenames.len == 1);
-    try testing.expect(mem.eql(u8, config.filenames[0], "file.txt"));
-}
-
-test "parseArgs color scheme test" {
-    const allocator = testing.allocator;
-
-    const args = try allocator.alloc([:0]u8, 5);
-    defer {
-        for (args) |arg| allocator.free(arg);
-        allocator.free(args);
-    }
-
-    args[0] = try allocator.dupeZ(u8, "zigrep");
-    args[1] = try allocator.dupeZ(u8, "--color-scheme");
-    args[2] = try allocator.dupeZ(u8, "dark");
-    args[3] = try allocator.dupeZ(u8, "pattern");
-    args[4] = try allocator.dupeZ(u8, "file.txt");
-
-    const config = try parseArgs(allocator, args);
-    defer config.deinit(allocator);
-
-    try testing.expect(mem.eql(u8, config.scheme.pattern, "\x1b[38;5;208m")); // Исправлен escape-код
-}
-
-test "parseArgs color mode test" {
-    const allocator = testing.allocator;
-
-    const args = try allocator.alloc([:0]u8, 5);
-    defer {
-        for (args) |arg| allocator.free(arg);
-        allocator.free(args);
-    }
-
-    args[0] = try allocator.dupeZ(u8, "zigrep");
-    args[1] = try allocator.dupeZ(u8, "--color");
-    args[2] = try allocator.dupeZ(u8, "always");
-    args[3] = try allocator.dupeZ(u8, "pattern");
-    args[4] = try allocator.dupeZ(u8, "file.txt");
-
-    const config = try parseArgs(allocator, args);
-    defer config.deinit(allocator);
-
-    try testing.expect(config.color_mode == .always);
-}
-
-test "highlightLine basic test" {
-    const allocator = testing.allocator;
-
-    const line = "Hello world";
-    const pattern = "world";
-    const scheme = ColorScheme{
-        .pattern = "\x1b[31m",
-        .line_num = "\x1b[33m",
-        .reset = "\x1b[0m",
-    };
-
-    var result = try highlightLine(allocator, line, pattern, scheme, false, false, "(test)", 1, false);
-    defer result.deinit();
-
-    const expected = "Hello \x1b[31mworld\x1b[0m";
-    try testing.expect(mem.eql(u8, result.items, expected));
-}
-
-test "highlightLine multiple matches test" {
-    const allocator = testing.allocator;
-
-    const line = "foo bar foo";
-    const pattern = "foo";
-    const scheme = ColorScheme{
-        .pattern = "\x1b[31m",
-        .line_num = "\x1b[33m",
-        .reset = "\x1b[0m",
-    };
-
-    var result = try highlightLine(allocator, line, pattern, scheme, false, false, "(test)", 1, false);
-    defer result.deinit();
-
-    const expected = "\x1b[31mfoo\x1b[0m bar \x1b[31mfoo\x1b[0m";
-    try testing.expect(mem.eql(u8, result.items, expected));
-}
-
-test "highlightLine no match test" {
-    const allocator = testing.allocator;
-
-    const line = "Hello world";
-    const pattern = "nonexistent";
-    const scheme = ColorScheme{
-        .pattern = "\x1b[31m",
-        .line_num = "\x1b[33m",
-        .reset = "\x1b[0m",
-    };
-
-    var result = try highlightLine(allocator, line, pattern, scheme, false, false, "(test)", 1, false);
-    defer result.deinit();
-
-    try testing.expect(mem.eql(u8, result.items, line));
-}
-
-test "process stdin input" {
-    const allocator = testing.allocator;
-
-    // Эмулируем ввод через pipe
-    const input = "first line\nsecond error line\nthird line";
-    var fbs = std.io.fixedBufferStream(input);
-
-    const config = Config{
-        .pattern = "error",
-        .filenames = &[_][]const u8{},
-        .scheme = ColorScheme{
-            .pattern = "\x1b[31m",
-            .line_num = "\x1b[33m",
-            .reset = "\x1b[0m",
-        },
-        .color_mode = .always,
-        .show_line_numbers = false,
-        .show_filenames = true,
-        .count_lines = false,
-    };
-
-    var output = std.ArrayList(u8).init(allocator);
-    defer output.deinit();
-
-    _ = try processStream(allocator, fbs.reader(), config, "(stdin)", output.writer());
-
-    const expected = "(stdin)\tsecond \x1b[31merror\x1b[0m line\n";
-    try testing.expectEqualStrings(expected, output.items);
-}
-
-test "case insensitive search" {
-    const allocator = testing.allocator;
-
-    // Тест 1: Проверка парсинга флага -i
-    {
-        const args = try allocator.alloc([:0]u8, 4);
-        defer {
-            for (args) |arg| allocator.free(arg);
-            allocator.free(args);
-        }
-
-        args[0] = try allocator.dupeZ(u8, "zgrep");
-        args[1] = try allocator.dupeZ(u8, "-i");
-        args[2] = try allocator.dupeZ(u8, "PaTtErN");
-        args[3] = try allocator.dupeZ(u8, "file.txt");
-
-        const config = try parseArgs(allocator, args);
-        defer config.deinit(allocator);
-
-        try testing.expect(config.ignore_case);
-        try testing.expect(mem.eql(u8, config.pattern, "PaTtErN"));
-    }
-
-    // Тест 2: Проверка парсинга флага --ignore-case
-    {
-        const args = try allocator.alloc([:0]u8, 4);
-        defer {
-            for (args) |arg| allocator.free(arg);
-            allocator.free(args);
-        }
-
-        args[0] = try allocator.dupeZ(u8, "zgrep");
-        args[1] = try allocator.dupeZ(u8, "--ignore-case");
-        args[2] = try allocator.dupeZ(u8, "PaTtErN");
-        args[3] = try allocator.dupeZ(u8, "file.txt");
-
-        const config = try parseArgs(allocator, args);
-        defer config.deinit(allocator);
-
-        try testing.expect(config.ignore_case);
-        try testing.expect(mem.eql(u8, config.pattern, "PaTtErN"));
-    }
-
-    // Тест 3: Проверка фактического поиска без учета регистра
-    {
-        const input = "First LINE\nSecond line\nTHIRD Line\n";
-        var fbs = std.io.fixedBufferStream(input);
-
-        const config = Config{
-            .pattern = "line",
-            .filenames = &[_][]const u8{},
-            .scheme = ColorScheme{
-                .pattern = "",
-                .line_num = "",
-                .reset = "",
-            },
-            .color_mode = .never,
-            .show_line_numbers = false,
-            .count_lines = false,
-            .ignore_case = true,
-        };
-
-        var output = std.ArrayList(u8).init(allocator);
-        defer output.deinit();
-
-        const count = try processStream(allocator, fbs.reader(), config, "test.txt", output.writer());
-
-        try testing.expect(count == 3);
-        try testing.expect(mem.eql(u8, output.items, "test.txt\tFirst LINE\n" ++
-            "test.txt\tSecond line\n" ++
-            "test.txt\tTHIRD Line\n"));
-    }
 }
