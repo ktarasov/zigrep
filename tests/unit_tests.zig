@@ -152,6 +152,17 @@ test "process stdin input" {
     try testing.expectEqualStrings(expected, output.items);
 }
 
+test "Russian case insensitive search" {
+    const allocator = std.testing.allocator;
+    const line = "Проверка СоВмеСТных ТестЁВ";
+    const pattern = "тестё";
+
+    const result = try main_mod.highlightLine(allocator, line, pattern, main_mod.ColorScheme{ .pattern = "*", .line_num = "*", .reset = "*" }, false, false, "", 1, true);
+    defer result.deinit();
+
+    try std.testing.expectEqualStrings("Проверка СоВмеСТных *ТестЁ*В", result.items);
+}
+
 test "case insensitive search" {
     const allocator = testing.allocator;
 
@@ -197,11 +208,12 @@ test "case insensitive search" {
 
     // Тест 3: Проверка фактического поиска без учета регистра
     {
-        const input = "First LINE\nSecond line\nTHIRD Line\n";
+        const input = "Первая СТРОКА\nВторая строка\nТРЕТЬЯ Строка\n";
+        // const input = "First LINE\nSecond line\nTHREED Line\n";
         var fbs = std.io.fixedBufferStream(input);
 
         const config = main_mod.Config{
-            .pattern = "line",
+            .pattern = "строка",
             .filenames = &[_][]const u8{},
             .scheme = main_mod.ColorScheme{
                 .pattern = "",
@@ -219,9 +231,12 @@ test "case insensitive search" {
 
         const count = try main_mod.processStream(allocator, fbs.reader(), config, "test.txt", output.writer());
 
+        std.debug.print("Количество обранруженных: {d}\n", .{count});
+        std.debug.print("Выходные данные:\n{s}\n", .{output.items});
+
         try testing.expect(count == 3);
-        try testing.expect(mem.eql(u8, output.items, "test.txt\tFirst LINE\n" ++
-            "test.txt\tSecond line\n" ++
-            "test.txt\tTHIRD Line\n"));
+        try testing.expect(mem.eql(u8, output.items, "test.txt\tПервая СТРОКА\n" ++
+            "test.txt\tВторая строка\n" ++
+            "test.txt\tТРЕТЬЯ Строка\n"));
     }
 }

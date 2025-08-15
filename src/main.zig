@@ -224,7 +224,7 @@ pub fn processStream(
 
         var patternIsFound = false;
         if (config.ignore_case) {
-            patternIsFound = std.ascii.indexOfIgnoreCase(line, config.pattern) != null;
+            patternIsFound = try caseInsensitiveSearch(allocator, line, config.pattern) != null;
         } else {
             patternIsFound = mem.indexOf(u8, line, config.pattern) != null;
         }
@@ -316,7 +316,7 @@ pub fn highlightLine(
         if (remaining.len < pattern.len) break;
 
         const start_opt = if (ignore_case)
-            std.ascii.indexOfIgnoreCase(remaining, pattern)
+            try caseInsensitiveSearch(allocator, remaining, pattern)
         else
             std.mem.indexOf(u8, remaining, pattern);
 
@@ -332,7 +332,8 @@ pub fn highlightLine(
         // Проверка полного совпадения для ignore_case
         if (ignore_case) {
             const candidate = line[abs_start .. abs_start + pattern.len];
-            if (!std.ascii.eqlIgnoreCase(candidate, pattern)) {
+            const is_full_eql = try caseInsensitiveSearch(allocator, candidate, pattern);
+            if (is_full_eql == null) {
                 last_idx += 1;
                 continue;
             }
@@ -348,6 +349,60 @@ pub fn highlightLine(
     // Добавляем оставшуюся часть строки
     try result.appendSlice(line[last_idx..]);
     return result;
+}
+
+// Кастомное преобразование строки в нижний регистр, с поддержкой
+// обработки русских символов, латиницы и акцентированных знаков.
+fn toLowerCustom(allocator: Allocator, str: []const u8) ![]const u8 {
+    var result = std.ArrayList(u8).init(allocator);
+    var iter = std.unicode.Utf8Iterator{ .bytes = str, .i = 0 };
+
+    while (iter.nextCodepoint()) |cp| {
+        const lower = blk: {
+            // Русские символы
+            if (cp >= 'А' and cp <= 'Я') break :blk cp + ('а' - 'А');
+            if (cp == 'Ё') break :blk 'ё';
+
+            // Базовые латинские символы
+            if (cp >= 'A' and cp <= 'Z') break :blk cp + 32;
+
+            // Обработка акцентированных символов
+            break :blk switch (cp) {
+                0xC0...0xD6 => cp + 32, // À-Ö → à-ö
+                0xD8...0xDE => cp + 32, // Ø-Þ → ø-þ
+                0x100...0x17F => handleLatinExtended(cp),
+                else => cp,
+            };
+        };
+
+        var buf: [4]u8 = undefined;
+        const len = std.unicode.utf8Encode(lower, &buf) catch unreachable;
+        try result.appendSlice(buf[0..len]);
+    }
+
+    return result.toOwnedSlice();
+}
+
+fn handleLatinExtended(cp: u21) u21 {
+    // Для сложных преобразований добавьте дополнительные правила в switch
+    return switch (cp) {
+        0x0100 => 0x0101, // Ā → ā
+        0x0102 => 0x0103, // Ă → ă
+        0x0104 => 0x0105, // Ą → ą
+        // ... другие символы Latin Extended-A
+        else => cp,
+    };
+}
+
+// Регистронезависимый поиск подстроки в строке
+fn caseInsensitiveSearch(allocator: Allocator, haystack: []const u8, needle: []const u8) !?usize {
+    const lowerHay = try toLowerCustom(allocator, haystack);
+    defer allocator.free(lowerHay);
+
+    const lowerNeedle = try toLowerCustom(allocator, needle);
+    defer allocator.free(lowerNeedle);
+
+    return std.mem.indexOf(u8, lowerHay, lowerNeedle);
 }
 
 fn printHelp(prog_name: []const u8) void {
