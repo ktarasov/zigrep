@@ -2,6 +2,7 @@ const std = @import("std");
 const testing = std.testing;
 const mem = std.mem;
 const Allocator = std.mem.Allocator;
+const ArrayList = std.array_list.Managed;
 const main_mod = @import("zigrep");
 
 test "parseArgs basic test" {
@@ -122,12 +123,14 @@ test "highlightLine no match test" {
     try testing.expect(mem.eql(u8, result.items, line));
 }
 
-test "process stdin input" {
+test "process file input" {
     const allocator = testing.allocator;
 
-    // Эмулируем ввод через pipe
-    const input = "first line\nsecond error line\nthird line";
-    var fbs = std.io.fixedBufferStream(input);
+    var tests_dir = try std.fs.cwd().openDir("tests", .{ .iterate = true });
+    defer tests_dir.close();
+
+    const test_input = try tests_dir.openFile("input.txt", .{});
+    defer test_input.close();
 
     const config = main_mod.Config{
         .pattern = "error",
@@ -143,12 +146,12 @@ test "process stdin input" {
         .count_lines = false,
     };
 
-    var output = std.ArrayList(u8).init(allocator);
+    var output = ArrayList(u8).init(allocator);
     defer output.deinit();
 
-    _ = try main_mod.processStream(allocator, fbs.reader(), config, "(stdin)", output.writer());
+    _ = try main_mod.processStream(allocator, test_input, config, "input.txt", output.writer());
 
-    const expected = "(stdin)\tsecond \x1b[31merror\x1b[0m line\n";
+    const expected = "input.txt\tsecond \x1b[31merror\x1b[0m line\n";
     try testing.expectEqualStrings(expected, output.items);
 }
 
@@ -208,9 +211,11 @@ test "case insensitive search" {
 
     // Тест 3: Проверка фактического поиска без учета регистра
     {
-        const input = "Первая СТРОКА\nВторая строка\nТРЕТЬЯ Строка\n";
-        // const input = "First LINE\nSecond line\nTHREED Line\n";
-        var fbs = std.io.fixedBufferStream(input);
+        var tests_dir = try std.fs.cwd().openDir("tests", .{ .iterate = true });
+        defer tests_dir.close();
+
+        const test_input = try tests_dir.openFile("input_rus.txt", .{});
+        defer test_input.close();
 
         const config = main_mod.Config{
             .pattern = "строка",
@@ -226,17 +231,17 @@ test "case insensitive search" {
             .ignore_case = true,
         };
 
-        var output = std.ArrayList(u8).init(allocator);
+        var output = ArrayList(u8).init(allocator);
         defer output.deinit();
 
-        const count = try main_mod.processStream(allocator, fbs.reader(), config, "test.txt", output.writer());
+        const count = try main_mod.processStream(allocator, test_input, config, "input_rus.txt", output.writer());
 
-        std.debug.print("Количество обранруженных: {d}\n", .{count});
-        std.debug.print("Выходные данные:\n{s}\n", .{output.items});
+        // std.debug.print("Количество обранруженных: {d}\n", .{count});
+        // std.debug.print("Выходные данные:\n{s}\n", .{output.items});
 
         try testing.expect(count == 3);
-        try testing.expect(mem.eql(u8, output.items, "test.txt\tПервая СТРОКА\n" ++
-            "test.txt\tВторая строка\n" ++
-            "test.txt\tТРЕТЬЯ Строка\n"));
+        try testing.expect(mem.eql(u8, output.items, "input_rus.txt\tПервая СТРОКА\n" ++
+            "input_rus.txt\tВторая строка\n" ++
+            "input_rus.txt\tТРЕТЬЯ Строка\n"));
     }
 }
