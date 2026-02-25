@@ -6,6 +6,7 @@ const process = std.process;
 const mem = std.mem;
 const posix = std.posix;
 const Allocator = std.mem.Allocator;
+const ArrayList = std.array_list.Managed;
 
 // Цветовые схемы с использованием StaticStringMap
 pub const ColorScheme = struct {
@@ -69,16 +70,16 @@ pub fn main() !void {
     const config = try parseArgs(allocator, args);
     defer config.deinit(allocator);
 
-    const stdout = std.io.getStdOut().writer();
+    var stdout = fs.File.stdout().writer(&.{});
 
-    _ = try processInput(allocator, config, stdout);
+    _ = try processInput(allocator, config, &stdout.interface);
 }
 
 fn detectColorMode(config: Config) bool {
     return switch (config.color_mode) {
         .always => true,
         .never => false,
-        .auto => std.io.getStdOut().isTty(),
+        .auto => fs.File.stdout().isTty(),
     };
 }
 
@@ -93,7 +94,7 @@ fn parseColorScheme(name: []const u8) !ColorScheme {
 }
 
 pub fn parseArgs(allocator: Allocator, args: [][:0]u8) !Config {
-    var filenames = std.ArrayList([]const u8).init(allocator);
+    var filenames = ArrayList([]const u8).init(allocator);
     defer filenames.deinit();
 
     var pattern: ?[]const u8 = null;
@@ -204,23 +205,32 @@ pub fn parseArgs(allocator: Allocator, args: [][:0]u8) !Config {
 
 pub fn processStream(
     allocator: Allocator,
-    reader: anytype,
+    reader: fs.File,
     config: Config,
     source_name: []const u8,
     writer: anytype,
 ) !u32 {
-    var buf_reader = std.io.bufferedReader(reader);
-    var in_stream = buf_reader.reader();
+    const buf_length = 16384;
+    var line_buffer: [buf_length]u8 = undefined;
+    var reader_wrapper = reader.reader(&line_buffer);
+    const in_stream = &reader_wrapper.interface;
+
     var count: u32 = 0;
     var line_num: u32 = 1;
 
-    var line_buffer = std.ArrayList(u8).init(allocator);
-    defer line_buffer.deinit();
+    while (true) {
+        // Получим данные из потока до разделителя (перенос строки)
+        const line = in_stream.takeDelimiterExclusive('\n') catch |err| {
+            switch (err) {
+                error.EndOfStream => break,
+                else => return err,
+            }
+        };
 
-    while (in_stream.readUntilDelimiterArrayList(&line_buffer, '\n', 16384)) : (line_num += 1) {
-        defer line_buffer.clearRetainingCapacity();
-
-        const line = line_buffer.items;
+        // Если длина считанного равна 0 - прерываем цикл
+        if (line.len == 0) {
+            break;
+        }
 
         var patternIsFound = false;
         if (config.ignore_case) {
@@ -249,16 +259,25 @@ pub fn processStream(
                 try writer.print("{s}\n", .{highlighted.items});
             }
         }
-    } else |err| switch (err) {
-        error.EndOfStream => {},
-        else => return err,
+
+        // Проверим не достигли ли мы конца потока
+        // Если достигли, то выходим из цикла
+        if (in_stream.seek == in_stream.end) {
+            break;
+        }
+
+        // Пропустим разделитель, чтобы не споткнуться
+        // об него на следующей итерации :)
+        in_stream.toss(1);
+
+        line_num += 1;
     }
 
     return count;
 }
 
-fn processInput(allocator: Allocator, config: Config, writer: anytype) !u32 {
-    const stdin = std.io.getStdIn().reader();
+fn processInput(allocator: Allocator, config: Config, writer: *io.Writer) !u32 {
+    const stdin = fs.File.stdin();
     var total_count: u32 = 0;
 
     if (config.filenames.len > 0) {
@@ -273,7 +292,7 @@ fn processInput(allocator: Allocator, config: Config, writer: anytype) !u32 {
                 };
                 defer file.close();
 
-                const count = try processStream(allocator, file.reader(), config, filename, writer);
+                const count = try processStream(allocator, file, config, filename, writer);
                 total_count += count;
             }
         }
@@ -299,8 +318,8 @@ pub fn highlightLine(
     filename_path: []const u8,
     line_num: u32,
     ignore_case: bool,
-) !std.ArrayList(u8) {
-    var result = std.ArrayList(u8).init(allocator);
+) !ArrayList(u8) {
+    var result = ArrayList(u8).init(allocator);
     var last_idx: usize = 0;
 
     if (show_numbers) {
@@ -354,7 +373,7 @@ pub fn highlightLine(
 // Кастомное преобразование строки в нижний регистр, с поддержкой
 // обработки русских символов, латиницы и акцентированных знаков.
 fn toLowerCustom(allocator: Allocator, str: []const u8) ![]const u8 {
-    var result = std.ArrayList(u8).init(allocator);
+    var result = ArrayList(u8).init(allocator);
     var iter = std.unicode.Utf8Iterator{ .bytes = str, .i = 0 };
 
     while (iter.nextCodepoint()) |cp| {
