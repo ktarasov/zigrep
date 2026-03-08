@@ -1,12 +1,12 @@
 const std = @import("std");
 const testing = std.testing;
 const fs = std.fs;
-const io = std.io;
+const Io = std.Io;
 const process = std.process;
 const mem = std.mem;
 const posix = std.posix;
 const Allocator = std.mem.Allocator;
-const ArrayList = std.array_list.Managed;
+const ArrayList = std.array_list.Aligned;
 
 // Цветовые схемы с использованием StaticStringMap
 pub const ColorScheme = struct {
@@ -59,43 +59,48 @@ pub const Config = struct {
     }
 };
 
-pub fn main() !void {
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
+pub fn main( init: std.process.Init) !void {
+    //Обработка случая отсутствия аргументов
+    if( init.minimal.args.vector.len == 1 ){
+      printHelp();
+      return;
+    }
+    var args = init.minimal.args.iterate();
 
-    const args = try process.argsAlloc(allocator);
-    defer process.argsFree(allocator, args);
+    const config = try parseArgs(init.gpa, &args, init.environ_map);
+    defer config.deinit(init.gpa);
 
-    const config = try parseArgs(allocator, args);
-    defer config.deinit(allocator);
+    const out_buf: []u8  =  try init.gpa.alloc(u8, std.heap.page_size_max);
+    defer init.gpa.free( out_buf );
 
-    var stdout = fs.File.stdout().writer(&.{});
+    var stdout: std.Io.File.Writer = .init( std.Io.File.stdout(), init.io, out_buf);
 
-    _ = try processInput(allocator, config, &stdout.interface);
+    _ = try processInput(init.gpa, config, &stdout.interface, init.io);
 }
 
-fn detectColorMode(config: Config) bool {
-    return switch (config.color_mode) {
-        .always => true,
-        .never => false,
-        .auto => fs.File.stdout().isTty(),
-    };
-}
+// Не используется
+// fn detectColorMode(config: Config, output: *std.Io.File.Writer) bool {
+//     return switch (config.color_mode) {
+//         .always => true,
+//         .never => false,
+//         .auto => w.*.file.isTty(),
+//     };
+// }
 
-fn parseColorScheme(name: []const u8) !ColorScheme {
+fn parseColorScheme(name: []const u8) ColorScheme {
     return SCHEMES.get(name) orelse {
-        std.log.err("Unknown color scheme: '{s}'. Available options:", .{name});
+        std.log.defaultLog( .err, .default,"Unknown color scheme: '{s}'. Available options:", .{name});
         for (SCHEMES.keys()) |kv| {
-            std.log.err("  {s}", .{kv});
+            std.log.defaultLog( .err, .default,"  {s}", .{kv});
         }
-        return error.InvalidColorScheme;
+
+        return SCHEMES.get("default").?;
     };
 }
 
-pub fn parseArgs(allocator: Allocator, args: [][:0]u8) !Config {
-    var filenames = ArrayList([]const u8).init(allocator);
-    defer filenames.deinit();
+pub fn parseArgs(allocator: Allocator, args: *std.process.Args.Iterator, env_map: *std.process.Environ.Map) !Config {
+    var filenames = try ArrayList([]const u8, .@"8").initCapacity(allocator, 16);
+    defer filenames.deinit( allocator );
 
     var pattern: ?[]const u8 = null;
     var color_mode: ColorMode = .auto;
@@ -106,74 +111,84 @@ pub fn parseArgs(allocator: Allocator, args: [][:0]u8) !Config {
     var force_color = false;
     var scheme = SCHEMES.get("default").?;
 
-    var i: usize = 1; // Skip program name
-    while (i < args.len) {
-        const arg = args[i];
+    _ = args.skip(); // Пропуск относительного пути вызываемой программы
 
-        if (mem.startsWith(u8, arg, "-")) {
-            if (mem.startsWith(u8, arg, "--")) {
-                if (arg.len > 2) {
-                    // Обработка длинных флаговов
-                    const long_flag = arg[2..];
-                    if (mem.eql(u8, long_flag, "color")) {
-                        i += 1;
-                        color_mode = std.meta.stringToEnum(ColorMode, args[i]) orelse return error.InvalidColorMode;
-                    } else if (mem.eql(u8, long_flag, "color-scheme")) {
-                        i += 1;
-                        scheme = try parseColorScheme(args[i]);
-                    } else if (mem.eql(u8, long_flag, "help")) {
-                        printHelp(args[0]);
-                        process.exit(0);
-                    } else if (mem.eql(u8, long_flag, "no-line-numbers")) {
-                        show_line_numbers = false;
-                    } else if (mem.eql(u8, long_flag, "no-filenames")) {
-                        show_filenames = false;
-                    } else if (mem.eql(u8, long_flag, "count-lines")) {
-                        count_lines = true;
-                    } else if (mem.eql(u8, long_flag, "ignore-case")) {
-                        ignore_case = true;
-                    }
-                } else unreachable;
-            } else {
-                // Обработка коротких флаговов
-                var j: usize = 1;
-                while (j < arg.len) : (j += 1) {
-                    const flag = arg[j];
-                    switch (flag) {
-                        'h' => {
-                            printHelp(args[0]);
-                            process.exit(0);
-                        },
-                        'c' => {
-                            count_lines = true;
-                        },
-                        'l' => {
-                            show_line_numbers = false;
-                        },
-                        'f' => {
-                            show_filenames = false;
-                        },
-                        'i' => {
-                            ignore_case = true;
-                        },
-                        else => continue,
-                    }
-                }
+    while (args.next()) |arg| {
+      const state: u16 = @bitCast( [2]u8{arg[0],arg[1]} );
+      lbl: switch( state ) {
+        // ВНИАНИЕ: эти константы рассчитаны на little-endian (см. @bitCast)
+        0x682D => { //   -h, --help  Show help page
+          printHelp();
+          process.exit(0);
+        },
+        0x2D2D => {
+          // '-' в ASCII имеет код 2D ССЫЛКА: https://hexoback.vercel.app/cheatsheets/ASCII_Tables.docset/Contents/Resources/Documents/
+          // Обработка длинных аргументов, что начинаются с '--'
+          if( arg[2] == 0 ) return error.WrongArg;
+          // Обработка длинных флаговов
+
+          //TODO - Добавить обработку через Trie или staticstringmap. Как сделано с цветовыми схемами.
+          const long_flag = arg[2..];
+          if (mem.eql(u8, long_flag, "help")) {
+              printHelp();
+              process.exit(0);
+          } else if(mem.eql(u8, long_flag, "color-scheme")) {
+              scheme = parseColorScheme(args.next().?);
+          } else if(mem.eql(u8, long_flag, "color")) {
+              color_mode = std.meta.stringToEnum(ColorMode, args.next().?) orelse return error.InvalidColorMode;
+          } else if (mem.eql(u8, long_flag, "no-line-numbers")) {
+              show_line_numbers = false;
+          } else if (mem.eql(u8, long_flag, "no-filenames")) {
+              show_filenames = false;
+          } else if (mem.eql(u8, long_flag, "count-lines")) {
+              count_lines = true;
+          } else if (mem.eql(u8, long_flag, "ignore-case")) {
+              ignore_case = true;
+          }
+        },
+        0x6C2D => { show_line_numbers = false; continue :lbl 0;},  //   -l, --no-line-numbers     Disable line numbers
+        0x632D => { count_lines = true; continue :lbl 0;},         //   -c, --count-lines         Show the count lines has been found
+        0x662D => { show_filenames = false; continue :lbl 0;},     //   -f, --no-filenames        Disable filenames
+        0x692D => { ignore_case = true; continue :lbl 0;},         //   -i, --ignore-case         Case insensitive search
+        0x3D70 => { pattern = pattern_blk:{                        //   p=PATTERN                 Alternative way to set pattern
+          if( arg[2] == 0 ) continue;
+          if( pattern != null ) allocator.free( pattern.? );
+          const new_pattern = try allocator.dupe(u8, arg[2..]);
+          break :pattern_blk new_pattern;
+          };
+        },
+        0x0000 => { //Сделанно только чтобы была возможность писать аргументы в виде -lci. Так как естественным путём вы никак не получите такую строку. 
+          var i: usize = 2;
+          while( arg[i] != 0 ):( i += 1 ){
+            switch( arg[i] ){
+              'h' => {
+                printHelp();
+                process.exit(0);
+              },
+              'c' => count_lines = true,
+              'f' => show_filenames = false,
+              'i' => ignore_case = true,
+              'l' => show_line_numbers = false,
+              else => return error.WrongArg,
             }
-        } else if (pattern == null) {
+          }
+        },
+        else => {
+          if( pattern == null ) {
             pattern = try allocator.dupe(u8, arg);
-        } else {
+          } else {  
             const filename = try allocator.dupe(u8, arg);
-            try filenames.append(filename);
+            try filenames.append(allocator, filename);
+          }
         }
-        i += 1;
+      }
     }
 
     // Обработка переменных окружения
-    if (posix.getenv("CLICOLOR_FORCE") != null) {
+    if (env_map.get("CLICOLOR_FORCE") != null) {
         force_color = true;
         color_mode = .always;
-    } else if (posix.getenv("CLICOLOR") != null) {
+    } else if (env_map.get("CLICOLOR") != null) {
         color_mode = .always;
     }
 
@@ -185,10 +200,10 @@ pub fn parseArgs(allocator: Allocator, args: [][:0]u8) !Config {
 
     return Config{
         .pattern = pattern orelse {
-            printHelp(args[0]);
+            printHelp();
             process.exit(0);
         },
-        .filenames = filenames.toOwnedSlice() catch |err| {
+        .filenames = filenames.toOwnedSlice( allocator ) catch |err| {
             // Явное освобождение при ошибке
             for (filenames.items) |f| allocator.free(f);
             return err;
@@ -205,32 +220,32 @@ pub fn parseArgs(allocator: Allocator, args: [][:0]u8) !Config {
 
 pub fn processStream(
     allocator: Allocator,
-    reader: fs.File,
+    input_file: std.Io.File,
     config: Config,
     source_name: []const u8,
-    writer: anytype,
+    writer: *std.Io.Writer,
+    io: Io,
 ) !u32 {
-    const buf_length = 16384;
+    const buf_length = std.heap.page_size_max * 4;
     var line_buffer: [buf_length]u8 = undefined;
-    var reader_wrapper = reader.reader(&line_buffer);
-    const in_stream = &reader_wrapper.interface;
+    var r = input_file.reader(io, &line_buffer);
+    const stream = &r.interface;
 
     var count: u32 = 0;
     var line_num: u32 = 1;
 
     while (true) {
         // Получим данные из потока до разделителя (перенос строки)
-        const line = in_stream.takeDelimiterExclusive('\n') catch |err| {
-            switch (err) {
+        const line = stream.takeDelimiterInclusive('\n') catch |err| switch (err) {
                 error.EndOfStream => break,
                 else => return err,
-            }
         };
 
         // Если длина считанного равна 0 - прерываем цикл
-        if (line.len == 0) {
-            break;
-        }
+        // if (line.len == 0) {
+        //     continue;
+        // }
+        //Закомментировал ради тестов
 
         var patternIsFound = false;
         if (config.ignore_case) {
@@ -243,7 +258,7 @@ pub fn processStream(
             count += 1;
 
             if (!config.count_lines) {
-                const highlighted = try highlightLine(
+                var highlighted = try highlightLine(
                     allocator,
                     line,
                     config.pattern,
@@ -254,21 +269,27 @@ pub fn processStream(
                     line_num,
                     config.ignore_case,
                 );
-                defer highlighted.deinit();
+                defer highlighted.deinit( allocator );
 
-                try writer.print("{s}\n", .{highlighted.items});
+              try writer.print("{s}", .{highlighted.items});
+              try writer.flush();
             }
         }
 
-        // Проверим не достигли ли мы конца потока
-        // Если достигли, то выходим из цикла
-        if (in_stream.seek == in_stream.end) {
-            break;
-        }
+        // // Проверим не достигли ли мы конца потока
+        // // Если достигли, то выходим из цикла
+        // if (in_stream.seek == in_stream.end) {
+        //     break;
+        // }
 
-        // Пропустим разделитель, чтобы не споткнуться
-        // об него на следующей итерации :)
-        in_stream.toss(1);
+        // Так как при четнии линии и так есть проверка на EndOfStream - это откровенно лишнее
+
+
+        // // Пропустим разделитель, чтобы не споткнуться
+        // // об него на следующей итерации :)
+        // in_stream.toss(1);
+
+        //Вместо этого можно использовать takeDelimeterInclusive, что я и сделал. Это никак не повредило коду
 
         line_num += 1;
     }
@@ -276,33 +297,30 @@ pub fn processStream(
     return count;
 }
 
-fn processInput(allocator: Allocator, config: Config, writer: *io.Writer) !u32 {
-    const stdin = fs.File.stdin();
-    var total_count: u32 = 0;
+fn processInput(allocator: Allocator, config: Config, writer: *Io.Writer, io: Io) !u32 {
+    const stdin = std.Io.File.stdin();
 
-    if (config.filenames.len > 0) {
-        for (config.filenames) |filename| {
-            if (mem.eql(u8, filename, "-")) {
-                const count = try processStream(allocator, stdin, config, "(stdin)", writer);
-                total_count += count;
-            } else {
-                const file = fs.cwd().openFile(filename, .{}) catch |err| {
-                    std.log.err("Failed to open '{s}': {s}", .{ filename, @errorName(err) });
-                    continue;
-                };
-                defer file.close();
-
-                const count = try processStream(allocator, file, config, filename, writer);
-                total_count += count;
-            }
-        }
-    } else {
-        const count = try processStream(allocator, stdin, config, "(stdin)", writer);
-        total_count += count;
+    // Работает как cat, если нет аргументов - читает из стандартного воода
+    if (config.filenames.len == 0) {
+        _ = try processStream(allocator, stdin, config, "(stdin)", writer, io);
+        return 1;
     }
 
+    var total_count: u32 = 0;
+    for (config.filenames) |filename| {
+      const file = std.Io.Dir.cwd().openFile( io, filename, .{}) catch |err| {
+            std.log.defaultLog(.err, .default, "Failed to open '{s}': {s}", .{ filename, @errorName(err) });
+            continue;
+        };
+        defer file.close( io );
+
+        const count = try processStream(allocator, file, config, filename, writer, io);
+        total_count += count;
+    }
+  
     if (config.count_lines) {
         try writer.print("{d}\n", .{total_count});
+        try writer.flush();
     }
 
     return total_count;
@@ -318,16 +336,16 @@ pub fn highlightLine(
     filename_path: []const u8,
     line_num: u32,
     ignore_case: bool,
-) !ArrayList(u8) {
-    var result = ArrayList(u8).init(allocator);
+  ) !ArrayList(u8, .@"1" ) {
+    var result = try ArrayList(u8, .@"1" ).initCapacity(allocator, 16 );
     var last_idx: usize = 0;
 
     if (show_numbers) {
-        try result.writer().print("{s}{d:>6}:{s} ", .{ scheme.line_num, line_num, scheme.reset });
+        try result.print(allocator, "{s}{d:>6}:{s} ", .{ scheme.line_num, line_num, scheme.reset });
     }
 
     if (show_filenames) {
-        try result.writer().print("{s}\t", .{filename_path});
+        try result.print(allocator, "{s}\t", .{filename_path});
     }
 
     while (true) {
@@ -344,7 +362,7 @@ pub fn highlightLine(
 
         // Критически важная проверка границ
         if (abs_start + pattern.len > line.len) {
-            try result.appendSlice(remaining);
+            try result.appendSlice(allocator, remaining);
             break;
         }
 
@@ -358,22 +376,22 @@ pub fn highlightLine(
             }
         }
 
-        try result.appendSlice(line[last_idx..abs_start]);
-        try result.appendSlice(scheme.pattern);
-        try result.appendSlice(line[abs_start .. abs_start + pattern.len]);
-        try result.appendSlice(scheme.reset);
+        try result.appendSlice(allocator, line[last_idx..abs_start]);
+        try result.appendSlice(allocator, scheme.pattern);
+        try result.appendSlice(allocator, line[abs_start .. abs_start + pattern.len]);
+        try result.appendSlice(allocator, scheme.reset);
         last_idx = abs_start + pattern.len;
     }
 
     // Добавляем оставшуюся часть строки
-    try result.appendSlice(line[last_idx..]);
+    try result.appendSlice(allocator, line[last_idx..]);
     return result;
 }
 
 // Кастомное преобразование строки в нижний регистр, с поддержкой
 // обработки русских символов, латиницы и акцентированных знаков.
 fn toLowerCustom(allocator: Allocator, str: []const u8) ![]const u8 {
-    var result = ArrayList(u8).init(allocator);
+    var result = try ArrayList(u8, .@"1").initCapacity(allocator, 16);
     var iter = std.unicode.Utf8Iterator{ .bytes = str, .i = 0 };
 
     while (iter.nextCodepoint()) |cp| {
@@ -396,10 +414,10 @@ fn toLowerCustom(allocator: Allocator, str: []const u8) ![]const u8 {
 
         var buf: [4]u8 = undefined;
         const len = std.unicode.utf8Encode(lower, &buf) catch unreachable;
-        try result.appendSlice(buf[0..len]);
+        try result.appendSlice(allocator, buf[0..len]);
     }
 
-    return result.toOwnedSlice();
+    return result.toOwnedSlice( allocator );
 }
 
 fn handleLatinExtended(cp: u21) u21 {
@@ -421,30 +439,30 @@ fn caseInsensitiveSearch(allocator: Allocator, haystack: []const u8, needle: []c
     const lowerNeedle = try toLowerCustom(allocator, needle);
     defer allocator.free(lowerNeedle);
 
-    return std.mem.indexOf(u8, lowerHay, lowerNeedle);
+    return std.mem.find(u8, lowerHay, lowerNeedle);
 }
 
-fn printHelp(prog_name: []const u8) void {
+fn printHelp() void {
     std.debug.print(
-        \\Usage: {s} [OPTIONS] PATTERN FILE
+        \\Usage: zigrep [OPTIONS] PATTERN FILE
         \\Options:
         \\      --color <MODE>        Color mode (always/auto/never)
         \\      --color-scheme <NAME> Color scheme (available: 
-    , .{prog_name});
+    , .{});
 
     for (SCHEMES.keys(), 0..) |kv, i| {
         if (i > 0) std.debug.print("|", .{});
         std.debug.print("{s}", .{kv});
     }
 
-    std.debug.print(")\n", .{});
-
     std.debug.print(
+        \\
         \\  -l, --no-line-numbers     Disable line numbers
         \\  -f, --no-filenames        Disable filenames
         \\  -i, --ignore-case         Case insensitive search
         \\  -c, --count-lines         Show the count lines has been found
         \\  -h, --help                Show this help
+        \\  p=PATTERN                 Alternative way to set pattern
         \\
     , .{});
 }
