@@ -75,21 +75,23 @@ pub fn main() !void {
     _ = try processInput(allocator, config, &stdout.interface);
 }
 
-fn detectColorMode(config: Config) bool {
-    return switch (config.color_mode) {
-        .always => true,
-        .never => false,
-        .auto => fs.File.stdout().isTty(),
-    };
-}
+// Не используется
+// fn detectColorMode(config: Config) bool {
+//     return switch (config.color_mode) {
+//         .always => true,
+//         .never => false,
+//         .auto => fs.File.stdout().isTty(),
+//     };
+// }
 
-fn parseColorScheme(name: []const u8) !ColorScheme {
+fn parseColorScheme(name: []const u8) ColorScheme {
     return SCHEMES.get(name) orelse {
         std.log.err("Unknown color scheme: '{s}'. Available options:", .{name});
         for (SCHEMES.keys()) |kv| {
             std.log.err("  {s}", .{kv});
-        }
-        return error.InvalidColorScheme;
+      }
+
+    return SCHEMES.get("default").?;
     };
 }
 
@@ -104,69 +106,77 @@ pub fn parseArgs(allocator: Allocator, args: [][:0]u8) !Config {
     var count_lines = false;
     var ignore_case = false;
     var force_color = false;
-    var scheme = SCHEMES.get("default").?;
+    var scheme = parseColorScheme("default");
 
-    var i: usize = 1; // Skip program name
-    while (i < args.len) {
-        const arg = args[i];
+    var arg_indx: usize = 1; // Skip program name
+    while (arg_indx < args.len):(arg_indx += 1) {
+        const arg = args[arg_indx];
+        const state: u16 = @bitCast( [2]u8{arg[0],arg[1]} );
 
-        if (mem.startsWith(u8, arg, "-")) {
-            if (mem.startsWith(u8, arg, "--")) {
-                if (arg.len > 2) {
-                    // Обработка длинных флаговов
-                    const long_flag = arg[2..];
-                    if (mem.eql(u8, long_flag, "color")) {
-                        i += 1;
-                        color_mode = std.meta.stringToEnum(ColorMode, args[i]) orelse return error.InvalidColorMode;
-                    } else if (mem.eql(u8, long_flag, "color-scheme")) {
-                        i += 1;
-                        scheme = try parseColorScheme(args[i]);
-                    } else if (mem.eql(u8, long_flag, "help")) {
-                        printHelp(args[0]);
-                        process.exit(0);
-                    } else if (mem.eql(u8, long_flag, "no-line-numbers")) {
-                        show_line_numbers = false;
-                    } else if (mem.eql(u8, long_flag, "no-filenames")) {
-                        show_filenames = false;
-                    } else if (mem.eql(u8, long_flag, "count-lines")) {
-                        count_lines = true;
-                    } else if (mem.eql(u8, long_flag, "ignore-case")) {
-                        ignore_case = true;
-                    }
-                } else unreachable;
-            } else {
-                // Обработка коротких флаговов
-                var j: usize = 1;
-                while (j < arg.len) : (j += 1) {
-                    const flag = arg[j];
-                    switch (flag) {
-                        'h' => {
-                            printHelp(args[0]);
-                            process.exit(0);
-                        },
-                        'c' => {
-                            count_lines = true;
-                        },
-                        'l' => {
-                            show_line_numbers = false;
-                        },
-                        'f' => {
-                            show_filenames = false;
-                        },
-                        'i' => {
-                            ignore_case = true;
-                        },
-                        else => continue,
-                    }
-                }
+        lbl: switch( state ) {
+            // ВНИАНИЕ: эти константы рассчитаны на little-endian (см. @bitCast)
+            0x682D => {
+                printHelp( args[0] );
+                process.exit(0);
+            },
+          0x2D2D => {
+              // Обработка длинных флаговов
+              const long_flag = arg[2..];
+              if (mem.eql(u8, long_flag, "help")) {
+                  printHelp(args[0]);
+                  process.exit(0);
+              } else if (mem.eql(u8, long_flag, "color-scheme")) {
+                  arg_indx += 1;
+                  scheme = parseColorScheme(args[arg_indx]);
+              } else if (mem.eql(u8, long_flag, "color")) {
+                  arg_indx += 1;
+                  color_mode = std.meta.stringToEnum(ColorMode, args[arg_indx]) orelse return error.InvalidColorMode;
+              } else if (mem.eql(u8, long_flag, "no-line-numbers")) {
+                  show_line_numbers = false;
+              } else if (mem.eql(u8, long_flag, "no-filenames")) {
+                  show_filenames = false;
+              } else if (mem.eql(u8, long_flag, "count-lines")) {
+                  count_lines = true;
+              } else if (mem.eql(u8, long_flag, "ignore-case")) {
+                  ignore_case = true;
+              }
+          },
+          0x6C2D => { show_line_numbers = false; continue :lbl 0;},  //   -l, --no-line-numbers     Disable line numbers
+          0x632D => { count_lines = true; continue :lbl 0;},         //   -c, --count-lines         Show the count lines has been found
+          0x662D => { show_filenames = false; continue :lbl 0;},     //   -f, --no-filenames        Disable filenames
+          0x692D => { ignore_case = true; continue :lbl 0;},         //   -i, --ignore-case         Case insensitive search
+          0x3D70 => { pattern = pattern_blk:{                        //   p=PATTERN                 Alternative way to set pattern
+              if( arg[2] == 0 ) continue;
+              if( pattern != null ) allocator.free( pattern.? );
+              const new_pattern = try allocator.dupe(u8, arg[2..]);
+              break :pattern_blk new_pattern;
+          };
+        },
+        0x0000 => { //Сделанно только чтобы была возможность писать аргументы в виде -lci. Так как естественным путём вы никак не получите такую строку. 
+          var i: usize = 2;
+          while( arg[i] != 0 ):( i += 1 ){
+            switch( arg[i] ){
+              'h' => {
+                printHelp(args[0]);
+                process.exit(0);
+              },
+                'c' => count_lines = true,
+                'f' => show_filenames = false,
+                'i' => ignore_case = true,
+                'l' => show_line_numbers = false,
+                else => return error.WrongArg,
+              }
             }
-        } else if (pattern == null) {
+          },
+        else => {
+          if( pattern == null ) {
             pattern = try allocator.dupe(u8, arg);
-        } else {
+          } else {  
             const filename = try allocator.dupe(u8, arg);
             try filenames.append(filename);
-        }
-        i += 1;
+          }
+        },
+      }
     }
 
     // Обработка переменных окружения
@@ -220,17 +230,17 @@ pub fn processStream(
 
     while (true) {
         // Получим данные из потока до разделителя (перенос строки)
-        const line = in_stream.takeDelimiterExclusive('\n') catch |err| {
+        const line = in_stream.takeDelimiterInclusive('\n') catch |err| {
             switch (err) {
                 error.EndOfStream => break,
                 else => return err,
             }
         };
 
-        // Если длина считанного равна 0 - прерываем цикл
-        if (line.len == 0) {
-            break;
-        }
+        // // Если длина считанного равна 0 - прерываем цикл
+        // if (line.len == 0) {
+        //     break;
+        // } //Прерывает чтение и ломает чтение при паттерне \n\n 
 
         var patternIsFound = false;
         if (config.ignore_case) {
@@ -256,19 +266,21 @@ pub fn processStream(
                 );
                 defer highlighted.deinit();
 
-                try writer.print("{s}\n", .{highlighted.items});
+                try writer.print("{s}", .{highlighted.items});
             }
         }
 
-        // Проверим не достигли ли мы конца потока
-        // Если достигли, то выходим из цикла
-        if (in_stream.seek == in_stream.end) {
-            break;
-        }
+        // // Проверим не достигли ли мы конца потока
+        // // Если достигли, то выходим из цикла
+        // if (in_stream.seek == in_stream.end) {
+        //     break;
+        // }
+        // Не влияет на работу программы
 
-        // Пропустим разделитель, чтобы не споткнуться
-        // об него на следующей итерации :)
-        in_stream.toss(1);
+        // // Пропустим разделитель, чтобы не споткнуться
+        // // об него на следующей итерации :)
+        // in_stream.toss(1);
+        // Замена на метод takeDiliterInclusive решила эту проблему
 
         line_num += 1;
     }
@@ -280,24 +292,22 @@ fn processInput(allocator: Allocator, config: Config, writer: *io.Writer) !u32 {
     const stdin = fs.File.stdin();
     var total_count: u32 = 0;
 
-    if (config.filenames.len > 0) {
-        for (config.filenames) |filename| {
-            if (mem.eql(u8, filename, "-")) {
-                const count = try processStream(allocator, stdin, config, "(stdin)", writer);
-                total_count += count;
-            } else {
-                const file = fs.cwd().openFile(filename, .{}) catch |err| {
-                    std.log.err("Failed to open '{s}': {s}", .{ filename, @errorName(err) });
-                    continue;
-                };
-                defer file.close();
+    if (config.filenames.len == 0) {
+      const count = try processStream(allocator, stdin, config, "(stdin)", writer);
+      return count;
+    }
 
-                const count = try processStream(allocator, file, config, filename, writer);
-                total_count += count;
-            }
+    for (config.filenames) |filename| {
+        if (mem.eql(u8, config.filenames[0] , "-")) {
+            const count = try processStream(allocator, stdin, config, "(stdin)", writer);
+            total_count += count;
         }
-    } else {
-        const count = try processStream(allocator, stdin, config, "(stdin)", writer);
+        const file = fs.cwd().openFile(filename, .{}) catch |err| {
+            std.log.err("Failed to open '{s}': {s}", .{ filename, @errorName(err) });
+            continue;
+        };
+        defer file.close();
+        const count = try processStream(allocator, file, config, filename, writer);
         total_count += count;
     }
 
